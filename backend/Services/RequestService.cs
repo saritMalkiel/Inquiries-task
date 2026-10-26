@@ -11,7 +11,7 @@ namespace Requests.Services;
 /// </summary>
 public class RequestService : IRequestService
 {
-    private const int MaxBulkIds = 100;
+    private const int MaxBulkIds = 500;
 
     private readonly AppDb _db;
     private readonly IAggregationsCache _cache;
@@ -168,35 +168,39 @@ public class RequestService : IRequestService
     public async Task<StatusUpdateResult> UpdateStatusAsync(
         int id, UpdateStatusPayload body, string user, CancellationToken ct = default)
     {
-        if (!StatusTransitions.IsKnown(body.Status))
-            return new(StatusUpdateOutcome.InvalidStatus, null, $"Unknown status '{body.Status}'.");
+        if (!Enum.TryParse<Status>(body.Status, true, out var next))
+            return new StatusUpdateResult(StatusUpdateOutcome.InvalidStatus, Message: "סטטוס לא חוקי");
 
-        var entity = await _db.Requests.FirstOrDefaultAsync(r => r.Id == id, ct);
-        if (entity is null)
-            return new(StatusUpdateOutcome.NotFound, null, $"Request {id} not found.");
+        var entity = await _db.Requests.FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (entity is null) return new StatusUpdateResult(StatusUpdateOutcome.NotFound);
 
-        if (string.Equals(entity.Status, body.Status, StringComparison.OrdinalIgnoreCase))
-            return new(StatusUpdateOutcome.SameStatus, null, "Request is already in the requested status.");
+        if (entity.Status == next)
+            return new StatusUpdateResult(StatusUpdateOutcome.SameStatus, Message: "הסטטוס זהה לסטטוס הנוכחי");
 
-        if (!StatusTransitions.IsAllowed(entity.Status, body.Status))
-            return new(StatusUpdateOutcome.InvalidStatus, null,
-                $"Transition {entity.Status} -> {body.Status} is not allowed.");
+        if (!string.IsNullOrEmpty(body.RowVersion))
+        {
+            try
+            {
+                _db.Entry(entity).Property(x => x.RowVersion).OriginalValue =
+                    Convert.FromBase64String(body.RowVersion);
+            }
+            catch (FormatException)
+            {
+                return new StatusUpdateResult(StatusUpdateOutcome.BadRowVersion, Message: "RowVersion לא תקין");
+            }
+        }
 
-        // Optimistic concurrency: הדפדפן שולח את ה-RowVersion שקיבל בקריאה
-        _db.Entry(entity).Property(r => r.RowVersion).OriginalValue = body.RowVersion;
+        var prev = entity.Status;
+        entity.Status = next;
+        entity.UpdatedAt = DateTime.UtcNow;
 
-        var previous = entity.Status;
-        entity.Status = body.Status;
-        entity.StatusChangedAt = DateTime.UtcNow;
-        entity.StatusChangedBy = user;
-
-        _db.StatusHistory.Add(new StatusHistory
+        _db.StatusChanges.Add(new StatusChange
         {
             RequestId = entity.Id,
-            FromStatus = previous,
-            ToStatus = entity.Status,
-            ChangedBy = user,
-            ChangedAt = DateTime.UtcNow
+            PreviousStatus = prev,
+            NewStatus = next,
+            ChangedAt = entity.UpdatedAt,
+            ChangedBy = user
         });
 
         try
@@ -205,25 +209,88 @@ public class RequestService : IRequestService
         }
         catch (DbUpdateConcurrencyException)
         {
-            // הרשומה שונתה ע"י משתמש אחר בין הקריאה לשמירה
-            return new(StatusUpdateOutcome.Conflict, null, "The request was modified by someone else. Reload and retry.");
+            return new StatusUpdateResult(
+                StatusUpdateOutcome.Conflict,
+                Message: "הרשומה עודכנה בינתיים ע\"י משתמש אחר");
         }
 
-        return new(StatusUpdateOutcome.Success, new UpdateStatusResult(entity.Id, entity.Status, entity.RowVersion));
+        // Only after a successful commit - invalidating earlier would let a reader
+        // rebuild from the old rows and cache them for a full TTL.
+        _cache.Invalidate();
+
+        return new StatusUpdateResult(
+            StatusUpdateOutcome.Success,
+            new UpdateStatusResult(
+                entity.Id,
+                entity.Status.ToString(),
+                entity.RowVersion is null ? string.Empty : Convert.ToBase64String(entity.RowVersion),
+                entity.UpdatedAt));
     }
 
-    public async Task<BulkOutcome> BulkUpdateStatusAsync(BulkStatusPayload body, string user, CancellationToken ct = default)
+    public async Task<BulkOutcome> BulkUpdateStatusAsync(
+        BulkStatusPayload body, string user, CancellationToken ct = default)
     {
+        if (!Enum.TryParse<Status>(body.Status, true, out var next))
+            return new BulkOutcome(BulkOutcomeKind.InvalidStatus, Message: "סטטוס לא חוקי");
+
         if (body.Ids is null || body.Ids.Count == 0)
-            return new(BulkOutcomeKind.EmptyIds, null, "No ids supplied.");
+            return new BulkOutcome(BulkOutcomeKind.EmptyIds, Message: "לא נשלחו רשומות");
 
         if (body.Ids.Count > MaxBulkIds)
-            return new(BulkOutcomeKind.TooManyIds, null, $"At most {MaxBulkIds} ids per request.");
+            return new BulkOutcome(BulkOutcomeKind.TooManyIds, Message: $"עד {MaxBulkIds} רשומות בעדכון מרוכז");
 
-        if (!StatusTransitions.IsKnown(body.Status))
-            return new(BulkOutcomeKind.InvalidStatus, null, $"Unknown status '{body.Status}'.");
-        // ... המשך הקיים
+        var result = new BulkStatusResult();
+        var entities = await _db.Requests
+            .Where(x => body.Ids.Contains(x.Id))
+            .ToListAsync(ct);
+
+        var found = entities.Select(x => x.Id).ToHashSet();
+        foreach (var missing in body.Ids.Where(i => !found.Contains(i)))
+            result.Failed.Add(new BulkFailure(missing, "הרשומה לא נמצאה"));
+
+        var now = DateTime.UtcNow;
+        foreach (var entity in entities)
+        {
+            if (entity.Status == next)
+            {
+                result.Failed.Add(new BulkFailure(entity.Id, "הסטטוס זהה לנוכחי"));
+                continue;
+            }
+
+            var prev = entity.Status;
+            entity.Status = next;
+            entity.UpdatedAt = now;
+
+            _db.StatusChanges.Add(new StatusChange
+            {
+                RequestId = entity.Id,
+                PreviousStatus = prev,
+                NewStatus = next,
+                ChangedAt = now,
+                ChangedBy = user
+            });
+
+            result.Updated++;
+        }
+
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            return new BulkOutcome(
+                BulkOutcomeKind.Conflict,
+                Message: "אחת הרשומות עודכנה בינתיים — נסה שוב");
+        }
+
+        if (result.Updated > 0) _cache.Invalidate();
+
+        return new BulkOutcome(BulkOutcomeKind.Success, result);
     }
+
+    // === internals ===
+
     private static readonly System.Linq.Expressions.Expression<Func<ServiceRequest, ServiceRequestDto>> ToDto =
         x => new ServiceRequestDto(
             x.Id, x.Title, x.Description, x.OrganizationName,

@@ -132,26 +132,24 @@ public class RequestsController : ControllerBase
     }
 
     // PATCH /api/requests/bulk-status
-    [HttpPatch("bulk/status")]
-    [ProducesResponseType(typeof(BulkOutcome), StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    [ProducesResponseType(StatusCodes.Status409Conflict)]
-    public async Task<ActionResult<BulkOutcome>> BulkUpdateStatus([FromBody] BulkStatusPayload body, CancellationToken ct)
+    [HttpPatch("bulk-status")]
+    public async Task<ActionResult<BulkStatusResult>> BulkUpdateStatus(
+        [FromBody] BulkStatusPayload body, CancellationToken ct)
     {
-        if (body?.Ids is null || body.Ids.Count == 0)                 // 1
-            return BadRequest(new { message = "No ids supplied." });  // 2
-        if (body.Ids.Count > RequestService.MaxBulkIds)               // 3
-            return BadRequest(new { message = $"At most {RequestService.MaxBulkIds} ids per request." });
+        var user = User?.Identity?.Name ?? "system";
+        _logger.LogInformation("[REQ] PATCH bulk-status ids={Count} to={Status} by={User}",
+            body.Ids?.Count ?? 0, body.Status, user);
 
-        var outcome = await _service.BulkUpdateStatusAsync(body, CurrentUser, ct);
+        var outcome = await _requests.BulkUpdateStatusAsync(body, user, ct);
+
+        _logger.LogInformation("[REQ] PATCH bulk-status kind={Kind} message={Message} updated={Updated} failed={Failed}",
+            outcome.Kind, outcome.Message, outcome.Result?.Updated, outcome.Result?.Failed);
+
         return outcome.Kind switch
         {
-            BulkOutcomeKind.Success => Ok(outcome),
-            BulkOutcomeKind.Conflict => Conflict(outcome),
-            BulkOutcomeKind.EmptyIds => BadRequest(outcome),
-            BulkOutcomeKind.TooManyIds => BadRequest(outcome),
-            BulkOutcomeKind.InvalidStatus => UnprocessableEntity(outcome),
-            _ => Ok(outcome)
+            BulkOutcomeKind.Success => Ok(outcome.Result),
+            BulkOutcomeKind.Conflict => Conflict(new { message = outcome.Message }),
+            _ => BadRequest(outcome.Message)
         };
     }
 }
