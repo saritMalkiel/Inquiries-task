@@ -11,7 +11,7 @@ namespace Requests.Services;
 /// </summary>
 public class RequestService : IRequestService
 {
-    private const int MaxBulkIds = 500;
+    private const int MaxBulkIds = 100;
 
     private readonly AppDb _db;
     private readonly IAggregationsCache _cache;
