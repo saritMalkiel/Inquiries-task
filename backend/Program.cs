@@ -18,7 +18,14 @@ var app = builder.Build();
 
 using (var scope = app.Services.CreateScope())
 {
-    scope.ServiceProvider.GetRequiredService<Requests.Data.AppDb>().Database.EnsureCreated();
+    var db = scope.ServiceProvider.GetRequiredService<Requests.Data.AppDb>();
+    db.Database.EnsureCreated();
+
+    if (app.Environment.IsDevelopment())
+    {
+        var seedService = scope.ServiceProvider.GetRequiredService<Requests.Services.IDevelopmentSeedService>();
+        await seedService.SeedIfEmptyAsync();
+    }
 }
 
 if (app.Environment.IsDevelopment())
@@ -65,6 +72,7 @@ namespace Requests.Extensions
         {
             // Scoped: depends on AppDb, which is Scoped.
             services.AddScoped<Requests.Services.IRequestService, Requests.Services.RequestService>();
+            services.AddScoped<Requests.Services.IDevelopmentSeedService, Requests.Services.DevelopmentSeedService>();
             return services;
         }
 

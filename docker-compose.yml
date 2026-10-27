@@ -22,7 +22,7 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: Development
       ASPNETCORE_URLS: "http://+:5000"
-      ConnectionStrings__DefaultConnection: "Server=sqlserver,1433;Database=RequestsDb"
+      ConnectionStrings__DefaultConnection: "Server=sqlserver,1433;Database=RequestsDb;User Id=sa;Password=Your_strong_Pass123;TrustServerCertificate=True"
     ports:
       - "5000:5000"
     depends_on:

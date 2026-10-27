@@ -51,7 +51,8 @@ docker compose up --build
 1. `docker compose` בונה את `backend/Dockerfile` (multi-stage: restore → publish → runtime) ואת ה-Frontend.
 2. ה-API ממתין ל-SQL Server (`depends_on: condition: service_healthy`).
 3. ה-API קורא ל-`EnsureCreated()` בעליית התהליך — הסכימה נוצרת אוטומטית, כולל אינדקסים.
-4. ה-UI נגיש ב-4200 ומצביע ל-`http://localhost:5000`.
+4. אם הסביבה היא `Development` והטבלה ריקה, ה-API מזריק אוטומטית את נתוני הבדיקה הראשוניים (100,000 רשומות, דטרמיניסטיים).
+5. ה-UI נגיש ב-4200 ומצביע ל-`http://localhost:5000`.
 
 משתני הסביבה ב-`docker-compose.yml`:
 
@@ -78,6 +79,9 @@ environment:
 
 ## Seed — יצירת נתוני בדיקה
 
+במצב `Development` היישום מאתחל את מסד הנתונים אוטומטית אם הוא ריק, ולכן בדרך כלל אין צורך להפעיל את ה-Seed ידנית לאחר העלייה הראשונה.
+ה-Endpoint עדיין קיים לשימוש ידני במקרים של ריסטר/איפוס מחדש של הנתונים:
+
 ```bash
 curl.exe -X POST "http://localhost:5000/api/dev/seed?count=100000&reset=true"
 ```
@@ -90,6 +94,8 @@ curl.exe -X POST "http://localhost:5000/api/dev/seed?count=100000&reset=true"
 ה-Seed **דטרמיניסטי**: משתמש ב-`Random(42)` וב**תאריך בסיס קבוע** (לא `DateTime.UtcNow`),
 ולכן הרצה חוזרת עם `reset=true` מחזירה בדיוק את אותו מצב התחלתי.
 ה-Endpoint פתוח **רק בסביבת `Development`** (בשאר הסביבות מחזיר 404).
+
+> תזכורת: בהרצה הראשונה, אם הטבלה ריקה, השרת יתמלא אוטומטית בנתוני בדיקה. השימוש ב-`/api/dev/seed` מיועד בעיקר לאיפוס ידני של הסביבה או ליצירה חוזרת של מצב התחלתי.
 
 ---
 
@@ -120,7 +126,7 @@ $env:ConnectionStrings__DefaultConnection="Server=localhost,1433;Database=Reques
 export ConnectionStrings__DefaultConnection="Server=localhost,1433;Database=RequestsDb;User Id=sa;Password=Your_strong_Pass123;TrustServerCertificate=True"
 ```
 
-לאחר העלייה — הרצת Seed:
+אם תרצה לאפס את הנתונים ידנית, ניתן להפעיל שוב את ה-Seed:
 
 ```bash
 curl.exe -X POST "http://localhost:5000/api/dev/seed?count=100000&reset=true"
